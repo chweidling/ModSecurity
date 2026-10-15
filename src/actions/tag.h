@@ -34,14 +34,23 @@ class Tag : public Action {
  public:
     explicit Tag(std::unique_ptr<RunTimeString> z)
         : Action("tag"),
-        m_string(std::move(z)) { }
+        m_string(std::move(z)),
+        m_containsMacro(m_string->containsMacro()),
+        m_staticName(m_containsMacro ? "" : m_string->evaluate()) { }
 
     std::string getName(Transaction *transaction);
+    bool hasName(const std::string &name, Transaction *transaction);
 
     bool evaluate(RuleWithActions *rule, Transaction *transaction, RuleMessage &ruleMessage) override;
 
  protected:
     std::unique_ptr<RunTimeString> m_string;
+
+ private:
+    // A tag without macros evaluates to the same text in every
+    // transaction: it is expanded once, here, instead of per comparison.
+    const bool m_containsMacro;
+    const std::string m_staticName;
 };
 
 

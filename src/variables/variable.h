@@ -608,6 +608,10 @@ class Variable : public VariableMonkeyResolution {
         RuleWithActions *rule,
         std::vector<const VariableValue *> *l) = 0;
 
+    // The regex of a VariableRegex, nullptr for any other variable. Cheaper
+    // than a dynamic_cast where it is asked once per value and exclusion.
+    virtual const Utils::Regex *getRegex() const { return nullptr; }
+
 
     bool inline belongsToCollection(Variable *var) {
         return m_collectionName.size() == var->m_collectionName.size()
@@ -654,6 +658,8 @@ class VariableRegex : public Variable {
         m_regex(regex),
         Variable(name + ":" + "regex(" + regex + ")") { }
 
+    const Utils::Regex *getRegex() const override { return &m_r; }
+
     Utils::Regex m_r;
     // FIXME: no need for that.
     std::string m_regex;
@@ -668,9 +674,8 @@ class Variables : public std::vector<Variable *> {
     bool contains(const VariableValue *v) const {
         return std::find_if(begin(), end(),
             [v](const Variable *m) {
-                const auto *r = dynamic_cast<const VariableRegex *>(m);
-                if (r) {
-                    return !r->m_r.searchAll(v->getKey()).empty();
+                if (const auto *r = m->getRegex()) {
+                    return r->search(v->getKey()) > 0;
                 }
                 return v->getKeyWithCollection() == *m->m_fullName.get();
             }) != end();

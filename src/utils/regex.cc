@@ -55,6 +55,40 @@ class Pcre2MatchContextPtr {
  private:
     pcre2_match_context *m_match_context;
 };
+
+// pcre2_match_data_create_from_pattern() allocates on every match. A match
+// data with at least as many ovector pairs as the pattern needs gives the
+// same results, so each thread keeps one and grows it on demand. It is only
+// used between a match and reading its ovector, never across calls.
+class ThreadMatchData {
+ public:
+    ThreadMatchData() = default;
+    ThreadMatchData(const ThreadMatchData&) = delete;
+    ThreadMatchData& operator=(const ThreadMatchData&) = delete;
+
+    ~ThreadMatchData() {
+        pcre2_match_data_free(m_match_data);
+    }
+
+    pcre2_match_data *get(const pcre2_code *pc) {
+        uint32_t captures = 0;
+        pcre2_pattern_info(pc, PCRE2_INFO_CAPTURECOUNT, &captures);
+        if (m_match_data == nullptr
+            || pcre2_get_ovector_count(m_match_data) < captures + 1) {
+            pcre2_match_data_free(m_match_data);
+            m_match_data = pcre2_match_data_create(captures + 1, nullptr);
+        }
+        return m_match_data;
+    }
+
+ private:
+    pcre2_match_data *m_match_data = nullptr;
+};
+
+static pcre2_match_data *threadMatchData(const pcre2_code *pc) {
+    static thread_local ThreadMatchData match_data;
+    return match_data.get(pc);
+}
 #endif
 
 namespace modsecurity {
@@ -143,7 +177,7 @@ std::list<SMatch> Regex::searchAll(const std::string& s) const {
     PCRE2_SPTR pcre2_s = reinterpret_cast<PCRE2_SPTR>(s.c_str());
     PCRE2_SIZE offset = 0;
 
-    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(m_pc, nullptr);
+    pcre2_match_data *match_data = threadMatchData(m_pc);
     do {
         if (m_pcje == 0) {
             rc = pcre2_jit_match(m_pc, pcre2_s, s.length(),
@@ -183,9 +217,6 @@ std::list<SMatch> Regex::searchAll(const std::string& s) const {
         }
     } while (rc > 0);
 
-#ifndef WITH_PCRE
-    pcre2_match_data_free(match_data);
-#endif
     return retList;
 }
 
@@ -198,7 +229,7 @@ RegexResult Regex::searchOneMatch(const std::string& s, std::vector<SMatchCaptur
     }
 
     PCRE2_SPTR pcre2_s = reinterpret_cast<PCRE2_SPTR>(s.c_str());
-    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(m_pc, nullptr);
+    pcre2_match_data *match_data = threadMatchData(m_pc);
     int rc = 0;
     if (m_pcje == 0) {
         rc = pcre2_jit_match(m_pc, pcre2_s, s.length(), 0, 0, match_data, static_cast<pcre2_match_context*>(match_context));
@@ -235,9 +266,6 @@ RegexResult Regex::searchOneMatch(const std::string& s, std::vector<SMatchCaptur
         captures.push_back(capture);
     }
 
-#ifndef WITH_PCRE
-    pcre2_match_data_free(match_data);
-#endif
     return to_regex_result(rc);
 }
 
@@ -253,7 +281,7 @@ RegexResult Regex::searchGlobal(const std::string& s, std::vector<SMatchCapture>
     PCRE2_SPTR pcre2_s = reinterpret_cast<PCRE2_SPTR>(s.c_str());
     PCRE2_SIZE startOffset = 0;
 
-    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(m_pc, nullptr);
+    pcre2_match_data *match_data = threadMatchData(m_pc);
     while (startOffset <= s.length()) {
         uint32_t pcre2_options = 0;
         if (prev_match_zero_length) {
@@ -264,7 +292,6 @@ RegexResult Regex::searchGlobal(const std::string& s, std::vector<SMatchCapture>
 
         RegexResult regex_result = to_regex_result(rc);
         if (regex_result != RegexResult::Ok) {
-            pcre2_match_data_free(match_data);
             return regex_result;
         }
         const PCRE2_SIZE *ovector = pcre2_get_ovector_pointer(match_data);
@@ -343,16 +370,13 @@ RegexResult Regex::searchGlobal(const std::string& s, std::vector<SMatchCapture>
         }
     }
 
-#ifndef WITH_PCRE
-    pcre2_match_data_free(match_data);
-#endif
     return RegexResult::Ok;
 }
 
 int Regex::search(const std::string& s, SMatch *match) const {
 #ifndef WITH_PCRE
     PCRE2_SPTR pcre2_s = reinterpret_cast<PCRE2_SPTR>(s.c_str());
-    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(m_pc, nullptr);
+    pcre2_match_data *match_data = threadMatchData(m_pc);
     int ret = 0;
     if (m_pcje == 0) {
         ret = pcre2_match(m_pc, pcre2_s, s.length(),
@@ -377,16 +401,13 @@ int Regex::search(const std::string& s, SMatch *match) const {
             0);
     }
 
-#ifndef WITH_PCRE
-    pcre2_match_data_free(match_data);
-#endif
     return ret;
 }
 
 int Regex::search(const std::string& s) const {
 #ifndef WITH_PCRE
     PCRE2_SPTR pcre2_s = reinterpret_cast<PCRE2_SPTR>(s.c_str());
-    pcre2_match_data *match_data = pcre2_match_data_create_from_pattern(m_pc, nullptr);
+    pcre2_match_data *match_data = threadMatchData(m_pc);
     int rc = 0;
     if (m_pcje == 0) {
         rc = pcre2_jit_match(m_pc, pcre2_s, s.length(), 0, 0, match_data, nullptr);
@@ -395,7 +416,6 @@ int Regex::search(const std::string& s) const {
     if (m_pcje != 0 || rc == PCRE2_ERROR_JIT_STACKLIMIT) {
         rc = pcre2_match(m_pc, pcre2_s, s.length(), 0, PCRE2_NO_JIT, match_data, nullptr);
     }
-    pcre2_match_data_free(match_data);
     if (rc > 0) {
         return 1; // match
     } else {
